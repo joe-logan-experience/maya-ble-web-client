@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Pan–Tilt BLE (acceptAllDevices)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background:#f7f7fb; color:#111; }
+    .wrap { max-width: 840px; margin: 32px auto; padding: 0 16px; }
+    .card { background:#fff; border-radius: 14px; box-shadow: 0 6px 24px rgba(0,0,0,0.06); padding: 16px 18px; margin-bottom: 16px; }
+    h1 { font-size: 22px; margin: 0 0 8px; }
+    h2 { font-size: 16px; margin: 0 0 12px; }
+    label { font-weight: 600; font-size: 13px; display:block; margin: 10px 0 6px; }
+    input[type="text"] { width: 100%; padding: 10px 12px; border: 1px solid #d8d8e0; border-radius: 10px; font-size: 14px; }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .btn { cursor: pointer; border: 0; border-radius: 12px; padding: 10px 14px; font-weight: 600; }
+    .btn-primary { background:#2563eb; color:white; }
+    .btn-dark { background:#111827; color:white; }
+    .btn-ghost { background:#f1f5f9; color:#111; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .bar { display:flex; gap:8px; flex-wrap:wrap; margin-top: 10px; }
+    .status { font-size: 13px; opacity:.8; margin-top:6px }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .range-row { display:flex; align-items:center; gap:10px; }
+    .range-row input[type="range"] { flex: 1; }
+    .pill { padding: 2px 8px; border-radius: 999px; background:#eef2ff; color:#3730a3; font-size: 12px; }
+    .log { height: 180px; overflow:auto; background:#f8fafc; border:1px solid #e5e7eb; border-radius: 10px; padding: 8px; font-size: 12px; }
+    .hint { font-size:12px; color:#475569; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Pan–Tilt BLE Controller</h1>
+      <div class="hint">Scans <strong>all</strong> nearby devices (Web Bluetooth chooser). After connecting, writes two bytes <span class="mono">[pan, tilt]</span> (0–255) to a writable characteristic.</div>
+    </div>
+
+    <div class="card">
+      <h2>Connection</h2>
+
+      <div class="row">
+        <div>
+          <label>Service UUID (required)</label>
+          <input id="svc" type="text" value="01a20000-0000-0000-0000-000000003412" />
+          <div class="hint">Lowercase hex required. This is used to access the service after connecting.</div>
+        </div>
+        <div>
+          <label>Characteristic UUID (optional)</label>
+          <input id="chr" type="text" value="02a20000-0000-0000-0000-000000003412" />
+          <div class="hint">Leave blank to auto-detect first writable characteristic.</div>
+        </div>
+      </div>
+
+      <div class="bar">
+        <button id="connect" class="btn btn-primary">Connect (acceptAllDevices)</button>
+        <button id="disconnect" class="btn btn-dark" disabled>Disconnect</button>
+        <span id="bleSupport" class="pill"></span>
+      </div>
+      <div id="status" class="status"></div>
+    </div>
+
+    <div class="card">
+      <h2>Controls</h2>
+      <div class="range-row">
+        <label style="margin:0;width:50px;">Pan</label>
+        <input id="pan" type="range" min="0" max="255" value="128"/>
+        <span id="panVal" class="mono">128</span>
+      </div>
+      <div class="range-row" style="margin-top:10px;">
+        <label style="margin:0;width:50px;">Tilt</label>
+        <input id="tilt" type="range" min="0" max="255" value="128"/>
+        <span id="tiltVal" class="mono">128</span>
+      </div>
+      <div class="bar" style="margin-top:10px;">
+        <button id="send" class="btn btn-primary" disabled>Send Now</button>
+        <button id="center" class="btn btn-ghost" disabled>Center (128,128)</button>
+        <button id="zero" class="btn btn-ghost" disabled>Zero (0,0)</button>
+        <button id="max" class="btn btn-ghost" disabled>Max (255,255)</button>
+      </div>
+      <div class="hint" style="margin-top:8px;">Auto-send is enabled while you drag the sliders (60 ms debounce).</div>
+    </div>
+
+    <div class="card">
+      <h2>Activity</h2>
+      <div id="log" class="log mono"></div>
+    </div>
+  </div>
+
+  <script>
+    const $ = sel => document.querySelector(sel);
+    const logEl = $("#log");
+    const statusEl = $("#status");
+    const svcInput = $("#svc");
+    const chrInput = $("#chr");
+    const connectBtn = $("#connect");
+    const disconnectBtn = $("#disconnect");
+    const sendBtn = $("#send");
+    const centerBtn = $("#center");
+    const zeroBtn = $("#zero");
+    const maxBtn = $("#max");
+    const panSlider = $("#pan");
+    const tiltSlider = $("#tilt");
+    const panVal = $("#panVal");
+    const tiltVal = $("#tiltVal");
+    const bleSupport = $("#bleSupport");
+
+    let device = null;
+    let server = null;
+    let characteristic = null;
+    let debounceTimer = null;
+
+    function appendLog(msg) {
+      const t = new Date().toLocaleTimeString();
+      logEl.innerText = `${t} – ${msg}\n` + logEl.innerText;
+    }
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function normalizeUuid(u) { return (u||"").trim().toLowerCase(); }
+
+    function setConnectedUI(connected) {
+      sendBtn.disabled = !connected;
+      centerBtn.disabled = !connected;
+      zeroBtn.disabled = !connected;
+      maxBtn.disabled = !connected;
+      disconnectBtn.disabled = !connected;
+      connectBtn.disabled = connected;
+    }
+
+    async function findWritableCharacteristic(service) {
+      const chars = await service.getCharacteristics();
+      const pref = chars.find(c => c.properties.writeWithoutResponse) ||
+                   chars.find(c => c.properties.write);
+      if (!pref) throw new Error("No writable characteristic found on service");
+      return pref;
+    }
+
+    async function connect() {
+      if (!navigator.bluetooth) {
+        appendLog("Web Bluetooth not supported in this browser.");
+        return;
+      }
+      setStatus("Opening chooser…");
+      try {
+        const svc = normalizeUuid(svcInput.value);
+        const chr = normalizeUuid(chrInput.value);
+
+        // Chooser: accept all devices, but ask Chrome to allow access to our service
+        const opts = {
+          acceptAllDevices: true,
+          optionalServices: svc ? [svc] : []
+        };
+        device = await navigator.bluetooth.requestDevice(opts);
+
+        device.addEventListener("gattserverdisconnected", onDisconnected);
+
+        setStatus("Connecting GATT…");
+        server = await device.gatt.connect();
+
+        if (!svc) {
+          throw new Error("Service UUID is required to access the service after connecting.");
+        }
+
+        setStatus("Getting primary service…");
+        const service = await server.getPrimaryService(svc);
+
+        try {
+          // exact characteristic first if provided
+          if (chr) {
+            characteristic = await service.getCharacteristic(chr);
+            appendLog("Found exact characteristic.");
+          } else {
+            throw new Error("No characteristic specified, falling back to discovery.");
+          }
+        } catch (e) {
+          appendLog("Exact char not found or not provided; searching for writable one…");
+          characteristic = await findWritableCharacteristic(service);
+          // Show the UUID we found (string form may not always be present in all browsers)
+          try { appendLog("Selected writable char (UUID may be hidden by browser)."); } catch {}
+        }
+
+        setConnectedUI(true);
+        setStatus(`Connected to ${device.name || "Unnamed device"}.`);
+        appendLog(`Connected to ${device.name || "(no name)"}.`);
+        // initial center
+        await sendBytes(128,128,false);
+      } catch (err) {
+        appendLog("Connect error: " + (err && err.message ? err.message : err));
+        setStatus("Connect failed.");
+        // cleanup partial
+        try { if (device && device.gatt?.connected) device.gatt.disconnect(); } catch {}
+        device = server = characteristic = null;
+        setConnectedUI(false);
+      }
+    }
+
+    function onDisconnected() {
+      setConnectedUI(false);
+      appendLog("Device disconnected.");
+      setStatus("Disconnected.");
+      device = server = characteristic = null;
+    }
+
+    async function disconnect() {
+      try { if (device?.gatt?.connected) device.gatt.disconnect(); } catch {}
+      onDisconnected();
+    }
+
+    async function writeBuffer(bytes) {
+      if (!characteristic) throw new Error("Not connected to a writable characteristic");
+      const buf = new Uint8Array(bytes);
+      // Prefer writeValueWithoutResponse if available
+      if (typeof characteristic.writeValueWithoutResponse === "function") {
+        await characteristic.writeValueWithoutResponse(buf);
+      } else {
+        await characteristic.writeValue(buf);
+      }
+    }
+
+    async function sendBytes(p, t, logIt = true) {
+      if (!characteristic) return;
+      const pan = Math.max(0, Math.min(255, Math.round(p)));
+      const tilt = Math.max(0, Math.min(255, Math.round(t)));
+      await writeBuffer([pan, tilt]);
+      if (logIt) appendLog(`Sent [${pan}, ${tilt}]`);
+    }
+
+    function scheduleAutoSend() {
+      if (!characteristic) return;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        sendBytes(Number(panSlider.value), Number(tiltSlider.value)).catch(e => appendLog("Send error: " + e.message));
+      }, 60);
+    }
+
+    // UI events
+    connectBtn.addEventListener("click", connect);
+    disconnectBtn.addEventListener("click", disconnect);
+
+    sendBtn.addEventListener("click", () => {
+      sendBytes(Number(panSlider.value), Number(tiltSlider.value)).catch(e => appendLog("Send error: " + e.message));
+    });
+    centerBtn.addEventListener("click", () => {
+      panSlider.value = "128"; tiltSlider.value = "128";
+      panVal.textContent = "128"; tiltVal.textContent = "128";
+      sendBytes(128,128).catch(e => appendLog("Send error: " + e.message));
+    });
+    zeroBtn.addEventListener("click", () => {
+      panSlider.value = "0"; tiltSlider.value = "0";
+      panVal.textContent = "0"; tiltVal.textContent = "0";
+      sendBytes(0,0).catch(e => appendLog("Send error: " + e.message));
+    });
+    maxBtn.addEventListener("click", () => {
+      panSlider.value = "255"; tiltSlider.value = "255";
+      panVal.textContent = "255"; tiltVal.textContent = "255";
+      sendBytes(255,255).catch(e => appendLog("Send error: " + e.message));
+    });
+
+    panSlider.addEventListener("input", () => { panVal.textContent = panSlider.value; scheduleAutoSend(); });
+    tiltSlider.addEventListener("input", () => { tiltVal.textContent = tiltSlider.value; scheduleAutoSend(); });
+
+    // Support indicator
+    if (!("bluetooth" in navigator)) {
+      bleSupport.textContent = "Web Bluetooth: not supported";
+      bleSupport.style.background = "#fee2e2";
+      bleSupport.style.color = "#991b1b";
+    } else {
+      bleSupport.textContent = "Web Bluetooth: supported";
+    }
+  </script>
+</body>
+</html>
+
